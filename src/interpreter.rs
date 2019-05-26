@@ -104,7 +104,7 @@ macro_rules! gpss_type_impl {
         impl fmt::Display for GpssType {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 match self {
-                    $(GpssType::$name(val) => write!(f, "$name, {}", val),)
+                    $(GpssType::$name(val) => write!(f, "{}, {}", stringify!($name), val),)
                     +
                 }
             }
@@ -164,26 +164,28 @@ impl Interpreter {
     }
 
     pub fn build_test_interpreter() -> Interpreter {
+        use GpssType::*;
+        use Instructions::*;
         Self::build_interpreter(
             vec![
-                Instructions::Push(1),      // Какой обьект сохранить (#1)
-                Instructions::SaveValue(0), // Вызов инструкции для сохранения значения
-                Instructions::Push(0),      // Generate возмет время генерации из ячейки #2
-                Instructions::Generate(2),  // Generate в следующий раз вернется на 2-ую иструкцию
-                Instructions::Transfer(5),
-                Instructions::Push(2),
-                Instructions::Advance(5),
-                Instructions::PrintClock,
-                Instructions::Push(3),
-                Instructions::Terminate(8),
-                Instructions::Push(3),
-                Instructions::Terminate(10),
+                Push(1),      // Какой обьект сохранить (#1)
+                SaveValue(0), // Вызов инструкции для сохранения значения
+                Push(0),      // Generate возмет время генерации из ячейки #2
+                Generate(2),  // Generate в следующий раз вернется на 2-ую иструкцию
+                Transfer(5),
+                Push(2),
+                Advance(5),
+                PrintClock,
+                Push(3),
+                Terminate(8),
+                Push(3),
+                Terminate(10),
             ],
             vec![
-                GpssType::UnsignedInteger(0),
-                GpssType::Float(0.01),
-                GpssType::Float(0.02),
-                GpssType::UnsignedInteger(1)
+                UnsignedInteger(0),
+                Float(0.01),
+                Float(0.02),
+                UnsignedInteger(1),
             ],
         )
     }
@@ -263,78 +265,91 @@ impl Interpreter {
         Self::fraction_time_to_int(self.stack_pop().into())
     }
 
+    fn generate(&mut self, time: u64) {
+        self.create_event(self.current_instruction, self.current_time + time, None);
+        // После того, как создали новое событие
+        // ищем и исполняем ближайшее
+        self.perform_closest();
+    }
+
+    fn advance(&mut self, time: u64) {
+        info!("Wake time for ADVANCE {}", self.current_time + time);
+        self.create_event(
+            self.current_instruction,
+            self.current_time + time,
+            self.current_transact.clone(),
+        );
+        self.perform_closest();
+    }
+
+    fn terminate(&mut self, count: u32) {
+        info!("TERMINATE {}", count);
+        self.start_entities -= count;
+        self.current_transact = None;
+        if self.events.len() > 0 {
+            self.perform_closest();
+        } else {
+            info!("STOP");
+            self.current_instruction += 1;
+        }
+    }
+
+    fn print(&mut self, var_id: usize) {
+        println!("{}", self.memory[var_id]);
+        self.current_instruction += 1;
+    }
+
+    fn print_clock(&mut self) {
+        println!("Clock {}", self.current_time);
+        self.current_instruction += 1;
+    }
+
+    fn transfer(&mut self, instruction_id: usize) {
+        info!(
+            "TRANSFER FROM {} TO {}",
+            self.current_instruction, instruction_id
+        );
+        self.current_instruction = instruction_id;
+    }
+
+    fn test_var(&mut self, else_goto: usize, cond_result: bool) {
+        if cond_result {
+            self.current_instruction += 1;
+        } else {
+            self.current_instruction = else_goto;
+        }
+    }
+
+    fn save_value(&mut self, var_id: usize, object: GpssType) {
+        if self.memory.len() > var_id {
+            self.memory[var_id] = object.clone();
+        } else if self.memory.len() == var_id {
+            self.memory.push(object.clone());
+        } else {
+            panic!("Cannot access variable {}", var_id);
+        }
+        self.current_instruction += 1;
+    }
+
+    fn push(&mut self, var_id: usize) {
+        info!("Push: {}", self.memory[var_id]);
+        self.stack.push(self.memory[var_id]);
+        self.current_instruction += 1;
+    }
+
     fn process_instruction(&mut self) {
         match self.instructions[self.current_instruction] {
             //Блоки, требущие подождать. Создаем для них событие в будущем
-            Instructions::Generate(_) => {
-                let time = self.stack_pop_time();
-                self.create_event(self.current_instruction, self.current_time + time, None);
-                // После того, как создали новое событие
-                // ищем и исполняем ближайшее
-                self.perform_closest();
-            }
-            Instructions::Advance(_) => {
-                let time = self.stack_pop_time();
-                info!("Wake time for ADVANCE {}", self.current_time + time);
-                self.create_event(
-                    self.current_instruction,
-                    self.current_time + time,
-                    self.current_transact.clone(),
-                );
-                self.perform_closest();
-            }
+            Instructions::Generate(_) => self.generate(self.stack_pop_time()),
+            Instructions::Advance(_) => self.advance(self.stack_pop_time()),
             //Блоки, не требующие подождать
-            Instructions::Terminate(_) => {
-                let count: u32 = self.stack_pop().into();
-                info!("TERMINATE {}", count);
-                self.start_entities -= count;
-                self.current_transact = None;
-                if self.events.len() > 0 {
-                    self.perform_closest();
-                } else {
-                    info!("STOP");
-                    self.current_instruction += 1;
-                }
-            }
-            Instructions::Print(var_id) => {
-                println!("{}", self.memory[var_id]);
-                self.current_instruction += 1;
-            }
-            Instructions::PrintClock => {
-                println!("Clock {}", self.current_time);
-                self.current_instruction += 1;
-            }
-            Instructions::Transfer(instruction_id) => {
-                info!(
-                    "TRANSFER FROM {} TO {}",
-                    self.current_instruction, instruction_id
-                );
-                self.current_instruction = instruction_id;
-            }
-            Instructions::TestVar(else_goto) => {
-                let cond_result = self.stack_pop().into();
-                if cond_result {
-                    self.current_instruction += 1;
-                } else {
-                    self.current_instruction = else_goto;
-                }
-            }
-            Instructions::SaveValue(var_id) => {
-                let object = self.stack_pop();
-                if self.memory.len() > var_id {
-                    self.memory[var_id] = object.clone();
-                } else if self.memory.len() == var_id {
-                    self.memory.push(object.clone());
-                } else {
-                    panic!("Cannot access variable {}", var_id);
-                }
-                self.current_instruction += 1;
-            }
-            Instructions::Push(var_id) => {
-                info!("Push: {}", self.memory[var_id]);
-                self.stack.push(self.memory[var_id]);
-                self.current_instruction += 1;
-            }
+            Instructions::Terminate(_) => self.terminate(self.stack_pop().into()),
+            Instructions::Print(var_id) => self.print(var_id),
+            Instructions::PrintClock => self.print_clock(),
+            Instructions::Transfer(instruction_id) => self.transfer(instruction_id),
+            Instructions::TestVar(else_goto) => self.test_var(else_goto, self.stack_pop().into()),
+            Instructions::SaveValue(var_id) => self.save_value(var_id, self.stack_pop()),
+            Instructions::Push(var_id) => self.push(var_id),
         };
     }
 
