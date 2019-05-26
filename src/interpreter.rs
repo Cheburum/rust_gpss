@@ -2,29 +2,37 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fmt;
 
-// Инструкции, помеченные (*) содержат в себе указатель, на инструкцию, начиная с которой
-// надо начать выполнять, чтобы в стэке оказались нужные аргументы
+/// Instructions, marked with (*) contain pointer(usize) to instruction
+/// from what it will be executed, to have proper arguments in stack
 
 enum Instructions {
-    Generate(usize),  // (*) из стека берет интервал времени для генерации
-    Advance(usize),   // (*) из стека берет интервал времени для генерации
-    Terminate(usize), // (*) из стека берет количество для удаления
-    Print(usize),     // Печатает переменную по адресу usize
-    PrintClock,       // просто печатает время
-    Transfer(usize),  // операндом является номер инструкции для перехода
-    TestVar(usize), // операндом является номер инструкции для перехода. Из стека берет условие(bool).
-    SaveValue(usize), // операндом является номер адрес для записи. Из стека берет значение переменной
-    Push(usize),      // операндом является адрес, откуда брать элемент для вставки в стэк
+    /// (*) pops time interval to generate from stack
+    Generate(usize),
+    /// (*) pops time interval to wait from stack
+    Advance(usize),
+    /// (*) pops terminate count from stack
+    Terminate(usize),
+    /// Prints object by its address
+    Print(usize),
+    /// Prints clock
+    PrintClock,
+    /// Operand is pointer to instruction
+    Transfer(usize),
+    /// Operand is pointer to instruction for false branch. Pops condition(GppsType::Boolean) from stack.
+    TestVar(usize),
+    /// Operand is a pointer to memory. Takes object from stack and writes it to memory.
+    SaveValue(usize),
+    /// Operand is a pointer to memory. Pushes object from memory to stack.
+    Push(usize),
 }
 
-enum EventType {
-    Generate,
-    Advance,
-}
-
+/// Event info, which must be handled to execute it lates
 struct Event {
+    /// pointer to instruction
     instruction_id: usize,
+    /// when will event be executed
     wake_time: u64,
+    /// transact related to event
     transact: Option<Transact>,
 }
 
@@ -50,7 +58,8 @@ impl Eq for Event {}
 
 macro_rules! gpss_type_impl {
     ($($name:ident($type_of:ty)),+) => {
-
+        /// Types you can use as properties of transacts
+        /// or as variables
         #[derive(Clone,Copy)]
         enum GpssType {
             $($name($type_of),)+
@@ -125,6 +134,7 @@ gpss_type_impl!(
     UnsignedInteger(u32)
 );
 
+/// Transact. Has 16 properties.
 #[derive(Clone)]
 struct Transact {
     params: [GpssType; 16],
@@ -138,14 +148,23 @@ impl Transact {
     }
 }
 
+/// State of interpreter
 pub struct Interpreter {
+    /// Instructions to execute(program)
     instructions: Vec<Instructions>,
+    /// Pointer to current instruction
     current_instruction: usize,
+    /// Current transact. For current context.
     current_transact: Option<Transact>,
+    /// Number START. Program stops when START becomes zero.
     start_entities: u32,
+    /// Clock of simulation
     current_time: u64,
+    /// Events, sorted by time of awake
     events: BinaryHeap<Event>,
+    /// Global memory
     memory: Vec<GpssType>,
+    /// Stack
     stack: Vec<GpssType>,
 }
 
@@ -163,6 +182,7 @@ impl Interpreter {
         }
     }
 
+    /// Program example
     pub fn build_test_interpreter() -> Interpreter {
         use GpssType::*;
         use Instructions::*;
@@ -197,6 +217,10 @@ impl Interpreter {
         (t * 1000.0) as u64
     }
 
+    fn int_time_to_fraction(t: u64) -> f32 {
+        t as f32 / 1000.0
+    }
+
     fn is_facility_utilised(fac: GpssType) -> Option<bool> {
         match fac {
             GpssType::Facility(count) => Some(count != 0),
@@ -204,6 +228,7 @@ impl Interpreter {
         }
     }
 
+    /// Pops object from stack. Panics if stack is empty.
     fn stack_pop(&mut self) -> GpssType {
         self.stack.pop().expect("Stack is empty, but trying to pop")
     }
@@ -234,7 +259,7 @@ impl Interpreter {
         info!("TERMINATE {}", count);
         self.start_entities -= count;
         self.current_transact = None;
-        if self.events.len() > 0 {
+        if self.events.len() > 0 && self.start_entities > 0 {
             self.perform_closest();
         } else {
             info!("STOP");
@@ -286,6 +311,8 @@ impl Interpreter {
         self.stack.push(self.memory[var_id]);
         self.current_instruction += 1;
     }
+
+    /// Executes commands from start to end. Excluding end.
     fn process_from_to(&mut self, start: usize, end: usize) {
         self.current_instruction = start;
         while self.current_instruction < end {
@@ -294,6 +321,7 @@ impl Interpreter {
         }
     }
 
+    /// Executes closest event
     fn perform_closest(&mut self) {
         // В этом match идет исполнение кода для откладываемых событий
         // Исполняем ближайшее событие, если оно есть
@@ -338,6 +366,7 @@ impl Interpreter {
         }
     }
 
+    /// Schedules event in future
     fn create_event(&mut self, instruction_id: usize, wake_time: u64, transact: Option<Transact>) {
         self.events.push(Event {
             instruction_id,
@@ -346,6 +375,7 @@ impl Interpreter {
         });
     }
 
+    /// Executes current instruction
     fn process_instruction(&mut self) {
         match self.instructions[self.current_instruction] {
             //Блоки, требущие подождать. Создаем для них событие в будущем
@@ -377,6 +407,7 @@ impl Interpreter {
         };
     }
 
+    /// Interpretation
     pub fn process(&mut self) {
         while self.start_entities > 0 && self.current_instruction < self.instructions.len() {
             self.process_instruction();
