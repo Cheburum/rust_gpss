@@ -6,14 +6,14 @@ use std::fmt;
 // надо начать выполнять, чтобы в стэке оказались нужные аргументы
 
 enum Instructions {
-    Generate(usize),  // (*)
-    Advance(usize),   // (*)
-    Terminate(usize), // (*)
+    Generate(usize),  // (*) из стека берет интервал времени для генерации
+    Advance(usize),   // (*) из стека берет интервал времени для генерации
+    Terminate(usize), // (*) из стека берет количество для удаления
     Print(usize),     // Печатает переменную по адресу usize
     PrintClock,       // просто печатает время
     Transfer(usize),  // операндом является номер инструкции для перехода
-    TestVar(usize),   // операндом является номер инструкции для перехода
-    SaveValue(usize), // операндом является номер адрес для записи
+    TestVar(usize), // операндом является номер инструкции для перехода. Из стека берет условие(bool).
+    SaveValue(usize), // операндом является номер адрес для записи. Из стека берет значение переменной
     Push(usize),      // операндом является адрес, откуда брать элемент для вставки в стэк
 }
 
@@ -175,6 +175,8 @@ impl Interpreter {
                 Transfer(5),
                 Push(2),
                 Advance(5),
+                Push(4),
+                TestVar(10),
                 PrintClock,
                 Push(3),
                 Terminate(8),
@@ -186,68 +188,13 @@ impl Interpreter {
                 Float(0.01),
                 Float(0.02),
                 UnsignedInteger(1),
+                Boolean(false),
             ],
         )
     }
 
     fn fraction_time_to_int(t: f32) -> u64 {
         (t * 1000.0) as u64
-    }
-
-    fn perform_closest(&mut self) {
-        // В этом match идет исполнение кода для откладываемых событий
-        // Исполняем ближайшее событие, если оно есть
-        match self.events.pop() {
-            Some(nearest_event) => {
-                self.current_time = nearest_event.wake_time;
-                info!("Woke up at {}", self.current_time);
-                self.current_transact = nearest_event.transact;
-
-                match self.instructions[nearest_event.instruction_id] {
-                    Instructions::Generate(begin) | Instructions::Advance(begin) => {
-                        self.current_instruction = begin;
-                        while self.current_instruction < nearest_event.instruction_id {
-                            self.process_instruction();
-                            self.current_instruction += 1;
-                        }
-                    }
-                    _ => return,
-                };
-
-                match self.instructions[nearest_event.instruction_id] {
-                    Instructions::Generate(_) => {
-                        let time = self.stack_pop_time();
-                        info!("DOING GENERATE");
-                        let mut new_transact = Transact::empty();
-                        new_transact.params[0] = GpssType::Integer(rand::random::<i32>());
-                        self.current_transact = Some(new_transact);
-                        // после генерации текущего транзакта, надо запланировать генерацию следующего
-                        self.create_event(
-                            nearest_event.instruction_id,
-                            self.current_time + time,
-                            None,
-                        );
-                        self.current_instruction = nearest_event.instruction_id + 1;
-                    }
-                    Instructions::Advance(_) => {
-                        info!("DOING ADVANCE");
-                        self.current_instruction = nearest_event.instruction_id + 1;
-                    }
-                    _ => {
-                        self.current_instruction = nearest_event.instruction_id + 1;
-                    }
-                }
-            }
-            None => {}
-        }
-    }
-
-    fn create_event(&mut self, instruction_id: usize, wake_time: u64, transact: Option<Transact>) {
-        self.events.push(Event {
-            instruction_id,
-            wake_time,
-            transact,
-        });
     }
 
     fn is_facility_utilised(fac: GpssType) -> Option<bool> {
@@ -266,6 +213,7 @@ impl Interpreter {
     }
 
     fn generate(&mut self, time: u64) {
+        info!("Wake time for GENERATE {}", self.current_time + time);
         self.create_event(self.current_instruction, self.current_time + time, None);
         // После того, как создали новое событие
         // ищем и исполняем ближайшее
@@ -313,6 +261,7 @@ impl Interpreter {
     }
 
     fn test_var(&mut self, else_goto: usize, cond_result: bool) {
+        info!("Condition is {}", cond_result);
         if cond_result {
             self.current_instruction += 1;
         } else {
@@ -321,6 +270,7 @@ impl Interpreter {
     }
 
     fn save_value(&mut self, var_id: usize, object: GpssType) {
+        info!("Saving value {} to {}", object, var_id);
         if self.memory.len() > var_id {
             self.memory[var_id] = object.clone();
         } else if self.memory.len() == var_id {
@@ -336,19 +286,93 @@ impl Interpreter {
         self.stack.push(self.memory[var_id]);
         self.current_instruction += 1;
     }
+    fn process_from_to(&mut self, start: usize, end: usize) {
+        self.current_instruction = start;
+        while self.current_instruction < end {
+            self.process_instruction();
+            self.current_instruction += 1;
+        }
+    }
+
+    fn perform_closest(&mut self) {
+        // В этом match идет исполнение кода для откладываемых событий
+        // Исполняем ближайшее событие, если оно есть
+        match self.events.pop() {
+            Some(nearest_event) => {
+                self.current_time = nearest_event.wake_time;
+                info!("Woke up at {}", self.current_time);
+                self.current_transact = nearest_event.transact;
+
+                match self.instructions[nearest_event.instruction_id] {
+                    Instructions::Generate(begin) | Instructions::Advance(begin) => {
+                        self.process_from_to(begin, nearest_event.instruction_id);
+                    }
+                    _ => return,
+                };
+
+                match self.instructions[nearest_event.instruction_id] {
+                    Instructions::Generate(_) => {
+                        let time = self.stack_pop_time();
+                        info!("DOING GENERATE");
+                        let mut new_transact = Transact::empty();
+                        new_transact.params[0] = GpssType::Integer(rand::random::<i32>());
+                        self.current_transact = Some(new_transact);
+                        // после генерации текущего транзакта, надо запланировать генерацию следующего
+                        self.create_event(
+                            nearest_event.instruction_id,
+                            self.current_time + time,
+                            None,
+                        );
+                        self.current_instruction = nearest_event.instruction_id + 1;
+                    }
+                    Instructions::Advance(_) => {
+                        info!("DOING ADVANCE");
+                        self.current_instruction = nearest_event.instruction_id + 1;
+                    }
+                    _ => {
+                        self.current_instruction = nearest_event.instruction_id + 1;
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn create_event(&mut self, instruction_id: usize, wake_time: u64, transact: Option<Transact>) {
+        self.events.push(Event {
+            instruction_id,
+            wake_time,
+            transact,
+        });
+    }
 
     fn process_instruction(&mut self) {
         match self.instructions[self.current_instruction] {
             //Блоки, требущие подождать. Создаем для них событие в будущем
-            Instructions::Generate(_) => self.generate(self.stack_pop_time()),
-            Instructions::Advance(_) => self.advance(self.stack_pop_time()),
+            Instructions::Generate(_) => {
+                let time = self.stack_pop_time();
+                self.generate(time);
+            }
+            Instructions::Advance(_) => {
+                let time = self.stack_pop_time();
+                self.advance(time);
+            }
             //Блоки, не требующие подождать
-            Instructions::Terminate(_) => self.terminate(self.stack_pop().into()),
+            Instructions::Terminate(_) => {
+                let count = self.stack_pop().into();
+                self.terminate(count);
+            }
             Instructions::Print(var_id) => self.print(var_id),
             Instructions::PrintClock => self.print_clock(),
             Instructions::Transfer(instruction_id) => self.transfer(instruction_id),
-            Instructions::TestVar(else_goto) => self.test_var(else_goto, self.stack_pop().into()),
-            Instructions::SaveValue(var_id) => self.save_value(var_id, self.stack_pop()),
+            Instructions::TestVar(else_goto) => {
+                let cond_result = self.stack_pop().into();
+                self.test_var(else_goto, cond_result)
+            }
+            Instructions::SaveValue(var_id) => {
+                let object = self.stack_pop();
+                self.save_value(var_id, object);
+            }
             Instructions::Push(var_id) => self.push(var_id),
         };
     }
